@@ -1,12 +1,14 @@
 import collections
 import errno
 import getpass
+import io
 import logging
 import multiprocessing
 import os
 import re
 import subprocess
 import threading
+import time
 from copy import deepcopy
 from dataclasses import dataclass
 from functools import partial
@@ -70,6 +72,31 @@ from .util import RST_EXTENSIONS
 
 NO_CHILDREN = (n.SubstitutionReference,)
 logger = logging.getLogger(__name__)
+
+
+def bundle(
+    filename: PurePath, members: Iterable[Tuple[str, Union[str, bytes]]]
+) -> bytes:
+    if filename.suffixes[-2:] == [".tar", ".gz"]:
+        import tarfile
+
+        current_time = time.time()
+        output_file = io.BytesIO()
+        with tarfile.open(None, "w:gz", output_file, format=tarfile.PAX_FORMAT) as tf:
+            for member_name, member_data in members:
+                if isinstance(member_data, str):
+                    member_data = bytes(member_data, "utf-8")
+                member_file = io.BytesIO(member_data)
+                tar_info = tarfile.TarInfo(name=member_name)
+                tar_info.size = len(member_data)
+                tar_info.mtime = int(current_time)
+                tar_info.mode = 0x644
+                tf.addfile(tar_info, member_file)
+
+        return output_file.getvalue()
+
+    else:
+        raise ValueError(f"Unknown bundling format: {filename.as_posix()}")
 
 
 @dataclass
@@ -1318,6 +1345,7 @@ class _Project:
                 self.backend.flush()
 
             # Build manpages
+            manpages: List[Tuple[str, str]] = []
             for name, definition in self.config.manpages.items():
                 fileid = FileId(definition.file)
                 manpage_page = self.pages.get(fileid)
@@ -1330,7 +1358,13 @@ class _Project:
                 for filename, rendered in man.render(
                     manpage_page, name, definition.title, definition.section
                 ).items():
+                    manpages.append((filename.as_posix(), rendered))
                     static_files[filename.as_posix()] = rendered
+
+            if self.config.bundle.manpages:
+                static_files[self.config.bundle.manpages] = bundle(
+                    PurePath(self.config.bundle.manpages), manpages
+                )
 
             post_metadata["static_files"] = static_files
             for fileid, diagnostics in post_diagnostics.items():
